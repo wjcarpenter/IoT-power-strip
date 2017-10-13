@@ -96,29 +96,36 @@ void process_channel_results()
 {
   for (int ii=0; ii<CHANNEL_COUNT; ++ii)
   {
+    float dcVoltage = ticks_to_millivolts(channelAverage[ii]);
+    float acVoltage = ticks_to_millivolts(channelMaximum[ii]);
     Serial.print("ch ");
     Serial.print(ii);
-    Serial.print(": ave=");
-    Serial.print(channelAverage[ii]);
-    Serial.print(", min=");
+    Serial.print(": min=");
     Serial.print(channelMinimum[ii]);
+    Serial.print(", ave=");
+    Serial.print(channelAverage[ii]);
     Serial.print(", max=");
     Serial.print(channelMaximum[ii]);
-
-    float voltage = 0.0;
-    int unbiased = channelAverage[ii] - DC_BIAS_TICKS;
-    if (unbiased > 0)
-    {
-      float proportion = 1024.0 / unbiased;
-      voltage = VOLTAGE_CEILING / proportion;      
-    }
-
-    Serial.print(", measure = ");
-    Serial.print(voltage);
+    Serial.print(", measure DC=");
+    Serial.print(dcVoltage);
+    Serial.print(" mV, AC=");
+    Serial.print(acVoltage);
     Serial.print(" mV");
-    
     Serial.println();
   }
   Serial.println();
+}
+
+float ticks_to_millivolts(int ticks)
+{
+  float voltage = 0.0;
+  float fraction = 0.0;
+  int unbiased = ticks - DC_BIAS_TICKS;
+  if (unbiased > 0)
+  {
+    fraction = unbiased / 1024.0;
+    voltage = fraction * VOLTAGE_CEILING;
+  }
+  return voltage;
 }
 
