@@ -10,19 +10,13 @@
 #include <CayenneMQTTESP8266.h>
 
 // WiFi network info.
-#if 0
-#else
 char ssid[] = "SSID";
 char wifiPassword[] = "wifi password";
-#endif
 
 // Cayenne authentication info. This should be obtained from the Cayenne Dashboard.
-#if 0
-#else
 char username[] = "cayenne-device-username";
 char password[] = "cayenne-device-password";
 char clientID[] = "cayenne-device-clientID";
-#endif
 // Cayenne config end   -------------------------------------
 
 #define CONSOLE_OUTPUT
@@ -47,55 +41,61 @@ typedef struct
 {
   float slope; 
   float intercept;
-} LINE;
+} LINE;  // you know, y= mx + b
 
 // these are AC amps (x axis), ACrms mV (y axis)
+// in theory, these should all be the same, but they are slightly different due to physics
 static LINE ac_input_nw {37.7, 11.5};
 static LINE ac_input_sw {37.7, 11.9};
 
 // these are ACrms mV (x axis), ticks (y axis)
-// in theory, these should all be the same
+// in theory, these should all be the same, but they are slightly different due to physics
 static LINE ac_mux_pin_0  {1.25, 6.15};
 static LINE ac_mux_pin_4  {1.25, 6.18};
 static LINE ac_mux_pin_8  {1.27, 3.79};
 static LINE ac_mux_pin_12 {1.26, 3.67};
 
 // these are DC mV (x axis), ticks (y axis)
-// in theory, these should all be the same
+// in theory, these should all be the same, but they are slightly different due to physics
 static LINE dc_mux_pin_0 {0.946, 415};
 static LINE dc_mux_pin_4 {0.944, 419};
 static LINE dc_mux_pin_8 {0.945, 418};
 static LINE dc_mux_pin_12 {0.944, 423};
 
+// it's hard to avoid using overloaded terminology
+// a "channel" is a path all the way from the AC current source to the ADC pin
 typedef struct
 {
-  int mux_pin;
-  char *name;
-  LINE ac_mv_vs_amps; // the AC input
+  int mux_pin;         // the input pin/channel on the multiplexer chip
+  char *name;          // we're all human
+  LINE ac_mv_vs_amps;  // the AC input
   LINE ticks_vs_ac_mv; // the mux pin AC line
   LINE ticks_vs_dc_mv; // the mux pin DC line
-  int ticks_dc_bias;
-  int ticks_minimum;
-  int ticks_average;
-  int ticks_maximum;
+  int ticks_dc_bias;   // not used in the current code
+  int ticks_minimum;   // ADC measured during sampling
+  int ticks_average;   // ADC measured during sampling
+  int ticks_maximum;   // ADC measured during sampling
 } CHANNEL;
 
+// for the current project, there are 4 possible inputs, but I am only using 2
 static CHANNEL c0  = { 0, "000000", ac_input_nw, ac_mux_pin_0,  dc_mux_pin_0,  409, 0,0,0};
-static CHANNEL c4  = { 4, "444444", ac_input_nw, ac_mux_pin_4,  dc_mux_pin_4,  409, 0,0,0};
+// static CHANNEL c4  = { 4, "444444", ac_input_nw, ac_mux_pin_4,  dc_mux_pin_4,  409, 0,0,0};
 static CHANNEL c8  = { 8, "888888", ac_input_sw, ac_mux_pin_8,  dc_mux_pin_8,  409, 0,0,0};
-static CHANNEL c12 = {12, "121212", ac_input_sw, ac_mux_pin_12, dc_mux_pin_12, 409, 0,0,0};
+// static CHANNEL c12 = {12, "121212", ac_input_sw, ac_mux_pin_12, dc_mux_pin_12, 409, 0,0,0};
 
 static CHANNEL channels[] = {c0, c8};
 const int CHANNEL_COUNT = sizeof(channels)/sizeof(channels[0]);
 
-//int channelNumbers[] = {0, 4, 8, 12};
-
-const int signalPin = A0;        // input pin for the signal
+const int adcPin = A0;        // input pin for the ADC signal
 const int ledPin = LED_BUILTIN;  // output pin for the LED
 const int LED_ON = LOW;
 const int LED_OFF = HIGH;
+// the mux uses active high for the address lines
+const int ADDRESS_LINE_SELECTED = HIGH;
+const int ADDRESS_LINE_DESELECTED = LOW;
 
-// these are the 4 address lines from the ESP32 to the multiplexer
+// these are the 4 pins used for address lines from the ESP32 to the multiplexer
+// they correspond to s0,s1,s2,s3 on the mux
 const int MUX_ADDRESS_LINES[] = {0, 4, 13, 12};
 const int MUX_ADDRESS_LINE_COUNT = sizeof(MUX_ADDRESS_LINES) / sizeof(MUX_ADDRESS_LINES[0]);
 
@@ -143,10 +143,10 @@ void measure_one_channel(CHANNEL *thisChannel)
   int max = -1;
   for (int ii=0; ii<READS_PER_MEASUREMENT; ++ii)
   {
-    int signalValue = analogRead(signalPin);
-    if (signalValue < min) min = signalValue;
-    if (signalValue > max) max = signalValue;
-    total += signalValue;
+    int adcValue = analogRead(adcPin);
+    if (adcValue < min) min = adcValue;
+    if (adcValue > max) max = adcValue;
+    total += adcValue;
     if (INTRA_MEASUREMENT_DELAY > 0) delay(INTRA_MEASUREMENT_DELAY);
   }
   thisChannel->ticks_average = ( total + (READS_PER_MEASUREMENT / 2) ) / READS_PER_MEASUREMENT;
@@ -160,11 +160,11 @@ void select_a_mux_pin(int mux_pin)
   {
     if (((mux_pin>>ii) & 0x1) == 0x1)
     {
-      digitalWrite(MUX_ADDRESS_LINES[ii], HIGH);
+      digitalWrite(MUX_ADDRESS_LINES[ii], ADDRESS_LINE_SELECTED);
     }
     else
     {
-      digitalWrite(MUX_ADDRESS_LINES[ii], LOW);
+      digitalWrite(MUX_ADDRESS_LINES[ii], ADDRESS_LINE_DESELECTED);
     }
   }
 }
@@ -178,6 +178,9 @@ void process_channel_results(CHANNEL *thisChannel)
   Cayenne.virtualWrite(thisChannel->mux_pin, acCurrent);    
 
 #ifdef CONSOLE_OUTPUT
+  // if this were time-critical or if I needed the TX/RX pins
+  // for something, I would not do the console output
+  // handy during development, though
   Serial.print("ch ");
   Serial.print(thisChannel->mux_pin);
   Serial.print(" ");
@@ -233,5 +236,3 @@ float AC_millivolts_to_AC_amps(CHANNEL *thisChannel, float acVoltage)
   if (acCurrent < 0) acCurrent = 0;
   return acCurrent;
 }
-
-
