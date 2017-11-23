@@ -1,4 +1,7 @@
 /*
+ * This is part of a current measuring project. See here for more
+ * explanation: https://www.hackster.io/wjcarpenter/iot-power-strip-fb6c8b
+ * 
  * Iterate over all input channels, average a bunch of reads from each.
  * Send the AC voltage results to Cayenne dashboard, channel for channel.
  * Print results to the console for local monitoring.
@@ -10,13 +13,19 @@
 #include <CayenneMQTTESP8266.h>
 
 // WiFi network info.
+#if 0
+#else
 char ssid[] = "SSID";
 char wifiPassword[] = "wifi password";
+#endif
 
 // Cayenne authentication info. This should be obtained from the Cayenne Dashboard.
+#if 0
+#else
 char username[] = "cayenne-device-username";
 char password[] = "cayenne-device-password";
 char clientID[] = "cayenne-device-clientID";
+#endif
 // Cayenne config end   -------------------------------------
 
 #define CONSOLE_OUTPUT
@@ -26,7 +35,7 @@ const int READS_PER_MEASUREMENT = 500;
 
 // delay (in ms) after selecting a channel and first reading it
 // I don't know if this "settling time" is necessary
-const int PRE_MEASUREMENT_DELAY = 20; // ms
+const int PRE_MEASUREMENT_DELAY = 100; // ms
 
 // we're going to take a bunch of samples, but we are really fast
 // so sleep between samples.
@@ -43,20 +52,23 @@ typedef struct
   float intercept;
 } LINE;  // you know, y= mx + b
 
-// these are AC amps (x axis), ACrms mV (y axis)
-// in theory, these should all be the same, but they are slightly different due to physics
-static LINE ac_input_nw {37.7, 11.5};
-static LINE ac_input_sw {37.7, 11.9};
+// these are AC amps (x axis), AC rms mV (y axis)
+// in theory, these should all be the same, but they can be slightly different due to physics
+static LINE ac_input_1 {24.1, -1.09};
+static LINE ac_input_2 {24.1, -1.09};
+static LINE ac_input_3 {24.1, -1.09};
+static LINE ac_input_4 {24.1, -1.09};
+static LINE ac_input_5 {24.1, -1.09};
 
-// these are ACrms mV (x axis), ticks (y axis)
-// in theory, these should all be the same, but they are slightly different due to physics
+// these are AC rms mV (x axis), ticks (y axis)
+// in theory, these should all be the same, but they can be slightly different due to physics
 static LINE ac_mux_pin_0  {1.25, 6.15};
 static LINE ac_mux_pin_4  {1.25, 6.18};
 static LINE ac_mux_pin_8  {1.27, 3.79};
 static LINE ac_mux_pin_12 {1.26, 3.67};
 
 // these are DC mV (x axis), ticks (y axis)
-// in theory, these should all be the same, but they are slightly different due to physics
+// in theory, these should all be the same, but they acan be slightly different due to physics
 static LINE dc_mux_pin_0 {0.946, 415};
 static LINE dc_mux_pin_4 {0.944, 419};
 static LINE dc_mux_pin_8 {0.945, 418};
@@ -78,10 +90,10 @@ typedef struct
 } CHANNEL;
 
 // for the current project, there are 4 possible inputs, but I am only using 2
-static CHANNEL c0  = { 0, "000000", ac_input_nw, ac_mux_pin_0,  dc_mux_pin_0,  409, 0,0,0};
-// static CHANNEL c4  = { 4, "444444", ac_input_nw, ac_mux_pin_4,  dc_mux_pin_4,  409, 0,0,0};
-static CHANNEL c8  = { 8, "888888", ac_input_sw, ac_mux_pin_8,  dc_mux_pin_8,  409, 0,0,0};
-// static CHANNEL c12 = {12, "121212", ac_input_sw, ac_mux_pin_12, dc_mux_pin_12, 409, 0,0,0};
+static CHANNEL c0  = { 0, "washer",     ac_input_4, ac_mux_pin_0,  dc_mux_pin_0,  409, 0,0,0};
+static CHANNEL c4  = { 4, "channel 4",  ac_input_4, ac_mux_pin_4,  dc_mux_pin_4,  409, 0,0,0};
+static CHANNEL c8  = { 8, "dryer",      ac_input_5, ac_mux_pin_8,  dc_mux_pin_8,  409, 0,0,0};
+static CHANNEL c12 = {12, "channel 12", ac_input_5, ac_mux_pin_12, dc_mux_pin_12, 409, 0,0,0};
 
 static CHANNEL channels[] = {c0, c8};
 const int CHANNEL_COUNT = sizeof(channels)/sizeof(channels[0]);
@@ -95,7 +107,7 @@ const int ADDRESS_LINE_SELECTED = HIGH;
 const int ADDRESS_LINE_DESELECTED = LOW;
 
 // these are the 4 pins used for address lines from the ESP32 to the multiplexer
-// they correspond to s0,s1,s2,s3 on the mux
+// they correspond to            s0,s1,s2, s3   on the mux
 const int MUX_ADDRESS_LINES[] = {0, 4, 13, 12};
 const int MUX_ADDRESS_LINE_COUNT = sizeof(MUX_ADDRESS_LINES) / sizeof(MUX_ADDRESS_LINES[0]);
 
