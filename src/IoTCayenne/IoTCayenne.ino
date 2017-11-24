@@ -44,13 +44,11 @@ const int INTRA_MEASUREMENT_DELAY = 1; // ms
 // delay (in ms) between iterations of the channel scan
 const int ITERATION_DELAY = 60 * 1000; // ms
 
-// ---- end of tunables ----
-
 typedef struct 
 {
   float slope; 
   float intercept;
-} LINE;  // you know, y= mx + b
+} LINE;  // you know: y = mx + b
 
 // these are AC amps (x axis), AC rms mV (y axis)
 // in theory, these should all be the same, but they can be slightly different due to physics
@@ -69,9 +67,9 @@ static LINE ac_mux_pin_12 {1.26, 3.67};
 
 // these are DC mV (x axis), ticks (y axis)
 // in theory, these should all be the same, but they acan be slightly different due to physics
-static LINE dc_mux_pin_0 {0.946, 415};
-static LINE dc_mux_pin_4 {0.944, 419};
-static LINE dc_mux_pin_8 {0.945, 418};
+static LINE dc_mux_pin_0  {0.946, 415};
+static LINE dc_mux_pin_4  {0.944, 419};
+static LINE dc_mux_pin_8  {0.945, 418};
 static LINE dc_mux_pin_12 {0.944, 423};
 
 // it's hard to avoid using overloaded terminology
@@ -87,13 +85,20 @@ typedef struct
   int ticks_minimum;   // ADC measured during sampling
   int ticks_average;   // ADC measured during sampling
   int ticks_maximum;   // ADC measured during sampling
+  float threshold_for_off; // values below this mean the device is off
+  float threshold_for_on;  // values above this mean the device is on
+  int on_off_virtual_pin;  // use this fake pin to tell Cayenne off or on
 } CHANNEL;
 
+const int VIRTUAL_ON    =  1;
+const int VIRTUAL_OFF   = -1;
+const int VIRTUAL_TWEEN =  0;
+
 // for the current project, there are 4 possible inputs, but I am only using 2
-static CHANNEL c0  = { 0, "washer",     ac_input_4, ac_mux_pin_0,  dc_mux_pin_0,  409, 0,0,0};
-static CHANNEL c4  = { 4, "channel 4",  ac_input_4, ac_mux_pin_4,  dc_mux_pin_4,  409, 0,0,0};
-static CHANNEL c8  = { 8, "dryer",      ac_input_5, ac_mux_pin_8,  dc_mux_pin_8,  409, 0,0,0};
-static CHANNEL c12 = {12, "channel 12", ac_input_5, ac_mux_pin_12, dc_mux_pin_12, 409, 0,0,0};
+static CHANNEL c0  = { 0, "washer",     ac_input_4, ac_mux_pin_0,  dc_mux_pin_0,  409, 0,0,0, 1.0,4.0, 20};
+static CHANNEL c4  = { 4, "channel 4",  ac_input_4, ac_mux_pin_4,  dc_mux_pin_4,  409, 0,0,0, 1.0,4.0, 24};
+static CHANNEL c8  = { 8, "dryer",      ac_input_5, ac_mux_pin_8,  dc_mux_pin_8,  409, 0,0,0, 1.0,4.0, 28};
+static CHANNEL c12 = {12, "channel 12", ac_input_5, ac_mux_pin_12, dc_mux_pin_12, 409, 0,0,0, 1.0,4.0, 32};
 
 static CHANNEL channels[] = {c0, c8};
 const int CHANNEL_COUNT = sizeof(channels)/sizeof(channels[0]);
@@ -187,7 +192,21 @@ void process_channel_results(CHANNEL *thisChannel)
   float acVoltage = ticks_to_AC_millivolts(thisChannel);
   float acCurrent = AC_millivolts_to_AC_amps(thisChannel, acVoltage);
 
-  Cayenne.virtualWrite(thisChannel->mux_pin, acCurrent);    
+  Cayenne.virtualWrite(thisChannel->mux_pin, acCurrent);
+  int state; // -1 is off, +1 is on, 0 is in between
+  if (acCurrent <= thisChannel->threshold_for_off)
+  {
+    state = VIRTUAL_OFF;
+  }
+  else if (acCurrent >= thisChannel->threshold_for_on)
+  {
+    state = VIRTUAL_ON;
+  }
+  else
+  {
+    state = VIRTUAL_TWEEN;
+  }
+  Cayenne.virtualWrite(thisChannel->on_off_virtual_pin, state);
 
 #ifdef CONSOLE_OUTPUT
   // if this were time-critical or if I needed the TX/RX pins
