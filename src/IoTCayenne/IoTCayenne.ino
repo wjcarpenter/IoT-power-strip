@@ -86,21 +86,30 @@ static LINE dc_mux_pin_4  {0.944, 419};
 static LINE dc_mux_pin_8  {0.945, 418};
 static LINE dc_mux_pin_12 {0.944, 423};
 
+typedef enum {ON=2, OFF=-2, MIDDLE=0} ON_OFF_STATE;
+
 // it's hard to avoid using overloaded terminology
 // a "channel" is a path all the way from the AC current source to the ADC pin
 typedef struct
 {
   int mux_pin;         // the input pin/channel on the multiplexer chip
   char *name;          // we're all human
-  LINE ac_mv_vs_amps;  // the AC input
-  LINE ticks_vs_ac_mv; // the mux pin AC line
-  LINE ticks_vs_dc_mv; // the mux pin DC line
+  LINE ac_mv_vs_amps;  // the AC input geometry
+  LINE ticks_vs_ac_mv; // the mux pin AC geometry
+  LINE ticks_vs_dc_mv; // the mux pin DC geometry
   int ticks_dc_bias;   // not used in the current code
+
   int ticks_minimum;   // ADC measured during sampling
   int ticks_average;   // ADC measured during sampling
   int ticks_maximum;   // ADC measured during sampling
+
+  ON_OFF_STATE state;         // is we is, or is we ain't?
+  long last_state_change;     // seconds
   float threshold_for_off;    // values below this mean the device is off
   float threshold_for_on;     // values above this mean the device is on
+  int seconds_for_off;        // how long must it be off before we believe it?
+  int seconds_for_on;         // likewise, for believing on?
+
   int ac_voltage_virtual_pin; // calculated AC Vrms
   int on_off_virtual_pin;     // use this fake pin to tell Cayenne off or on
   int ticks_min_virtual_pin;  // actual value read from the ADC
@@ -108,15 +117,11 @@ typedef struct
   int ticks_max_virtual_pin;  // actual value read from the ADC
 } CHANNEL;
 
-const int VIRTUAL_ON    =  2;
-const int VIRTUAL_OFF   = -2;
-const int VIRTUAL_TWEEN =  0;
-
 // for the current project, there are 4 possible inputs, but I am only using 2
-static CHANNEL c0  = { 0, "washer",     ac_input_4, ac_mux_pin_0,  dc_mux_pin_0,  409, 0,0,0, 1.0,4.0, 30,20,40,50,60};
-static CHANNEL c4  = { 4, "channel 4",  ac_input_4, ac_mux_pin_4,  dc_mux_pin_4,  409, 0,0,0, 1.0,4.0, 34,24,44,54,64};
-static CHANNEL c8  = { 8, "dryer",      ac_input_5, ac_mux_pin_8,  dc_mux_pin_8,  409, 0,0,0, 1.0,4.0, 38,28,48,58,68};
-static CHANNEL c12 = {12, "channel 12", ac_input_5, ac_mux_pin_12, dc_mux_pin_12, 409, 0,0,0, 1.0,4.0, 42,32,52,62,72};
+static CHANNEL c0  = { 0, "washer",     ac_input_4, ac_mux_pin_0,  dc_mux_pin_0,  409, 0,0,0, MIDDLE,0, 1.0,4.0,360,60, 30,20,40,50,60};
+static CHANNEL c4  = { 4, "channel 4",  ac_input_4, ac_mux_pin_4,  dc_mux_pin_4,  409, 0,0,0, MIDDLE,0, 1.0,4.0,0,0,    34,24,44,54,64};
+static CHANNEL c8  = { 8, "dryer",      ac_input_5, ac_mux_pin_8,  dc_mux_pin_8,  409, 0,0,0, MIDDLE,0, 1.0,4.0,60,60,  38,28,48,58,68};
+static CHANNEL c12 = {12, "channel 12", ac_input_5, ac_mux_pin_12, dc_mux_pin_12, 409, 0,0,0, MIDDLE,0, 1.0,4.0,0,0,    42,32,52,62,72};
 
 static CHANNEL channels[] = {c0, c8};
 const int CHANNEL_COUNT = sizeof(channels)/sizeof(channels[0]);
@@ -152,6 +157,7 @@ void setup()
   Cayenne.begin(username, password, clientID, ssid, wifiPassword);
 }
 
+static long previous_now = 0;
 void loop() 
 {
   Cayenne.loop();
@@ -159,7 +165,13 @@ void loop()
   for (int channelDex=0; channelDex<CHANNEL_COUNT; ++channelDex)
   {
 #if PRINT_MEASUREMENT_SUMMARY
-    if (channelDex == 0) Serial.println();
+    if (channelDex == 0) 
+    {
+      Serial.println();
+      long now = get_sorta_time_seconds();
+      Serial.print(now); Serial.print(" ");Serial.println(now - previous_now);
+      previous_now = now;
+    }
 #endif
     CHANNEL thisChannel = channels[channelDex];
     measure_one_channel(&thisChannel);
@@ -224,20 +236,39 @@ void process_channel_results(CHANNEL *thisChannel)
   Cayenne.virtualWrite(thisChannel->ticks_min_virtual_pin, thisChannel->ticks_minimum);
   Cayenne.virtualWrite(thisChannel->ticks_ave_virtual_pin, thisChannel->ticks_average);
   Cayenne.virtualWrite(thisChannel->ticks_max_virtual_pin, thisChannel->ticks_maximum);
-  int state; // -2 is off, +1 is on, 0 is in between
+
+  ON_OFF_STATE new_state = MIDDLE; // this shouldn't happen except at startup or an unlucky edge measurement
   if (acCurrent <= thisChannel->threshold_for_off)
   {
-    state = VIRTUAL_OFF;
+    new_state = OFF;
   }
   else if (acCurrent >= thisChannel->threshold_for_on)
   {
-    state = VIRTUAL_ON;
+    new_state = ON;
   }
-  else
+  ON_OFF_STATE channelState = thisChannel->state;
+  if (new_state != thisChannel->state)
   {
-    state = VIRTUAL_TWEEN;
+    long now = get_sorta_time_seconds();
+    long delta = now -thisChannel->last_state_change;
+    // The millis() function wraps around every 50 days or so, at which
+    // time the delta will be a large negative number. Adjust for that.
+    // If we miss a state change, we'll get it on a future next iteration.
+    // So, every couple of months, there is a potential for a state change
+    // being delayed ... as much as double the configured delay.
+    if (delta < 0)
+    {
+      delta = 0;
+      thisChannel->last_state_change = now;
+    }
+    if ((new_state == ON  &&  delta >= thisChannel->seconds_for_on)
+    ||  (new_state == OFF &&  delta >= thisChannel->seconds_for_off))
+    {
+      thisChannel->state = new_state;
+      thisChannel->last_state_change = now;
+    }
   }
-  Cayenne.virtualWrite(thisChannel->on_off_virtual_pin, state);
+  Cayenne.virtualWrite(thisChannel->on_off_virtual_pin, thisChannel->state);
 
 #if PRINT_MEASUREMENT_SUMMARY
   // if this were time-critical or if I needed the TX/RX pins
@@ -259,7 +290,8 @@ void process_channel_results(CHANNEL *thisChannel)
   Serial.print(acVoltage);
   Serial.print(" mV, ");
   Serial.print(acCurrent);
-  Serial.print(" amps");
+  Serial.print(" amps,  ");
+  Serial.print(thisChannel->state);
   Serial.println();
 #endif  
 }
@@ -286,7 +318,7 @@ float ticks_to_AC_millivolts(CHANNEL *thisChannel)
   //
   // Simpler to just take the observed maximum as the amplitude (subtracting
   // out the observed average, which ought to be "zero" [the DC bias built
-  // into the circuit. The only problem is if the signal is noisy. Then the
+  // into the circuit]). The only problem is if the signal is noisy. Then the
   // observed maximum could be an outlier, and the amplitude would be too high.
 
   int ticks       = thisChannel->ticks_maximum - thisChannel->ticks_average;
@@ -306,6 +338,14 @@ float AC_millivolts_to_AC_amps(CHANNEL *thisChannel, float acVoltage)
   float slope     = thisChannel->ac_mv_vs_amps.slope;
   float intercept = thisChannel->ac_mv_vs_amps.intercept;
   float acCurrent = (acVoltage - intercept) / slope;
-  if (acCurrent < 0) acCurrent = 0;
+  if (acCurrent < 0.1) acCurrent = 0; // very low currents are inaccurate
   return acCurrent;
 }
+
+// only approximately correct since millis() is only approximately correct
+long get_sorta_time_seconds()
+{
+  long sorta_millis = millis();
+  return (sorta_millis + 500) / 1000;
+}
+
