@@ -280,12 +280,21 @@ float ticks_to_DC_millivolts(CHANNEL *thisChannel)
 // (ticks - intercept) / slope = mv
 float ticks_to_AC_millivolts(CHANNEL *thisChannel)
 {
+  // A more accurate way to do this would be to record all of the sample
+  // points and then best-fit a sinusoidal wave regression to those points.
+  // Then use the amplitude of that sine wave as the peak. 
+  //
+  // Simpler to just take the observed maximum as the amplitude (subtracting
+  // out the observed average, which ought to be "zero" [the DC bias built
+  // into the circuit. The only problem is if the signal is noisy. Then the
+  // observed maximum could be an outlier, and the amplitude would be too high.
+
   int ticks       = thisChannel->ticks_maximum - thisChannel->ticks_average;
   float slope     = thisChannel->ticks_vs_ac_mv.slope;
   float intercept = thisChannel->ticks_vs_ac_mv.intercept;
   float mV = (ticks - intercept) / slope;
-  // convert to rms
-  mV = mV / 0.7071;
+  // convert to rms (Vpeak / sqrt(2))
+  mV = mV * 0.7071;
   if (mV < 0) mV = 0;
   return mV;
 }
