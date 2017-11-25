@@ -28,10 +28,13 @@ char clientID[] = "cayenne-device-clientID";
 #endif
 // Cayenne config end   -------------------------------------
 
-#define CONSOLE_OUTPUT
+// one-liner calculated values for each measurement chunk
+#define PRINT_MEASUREMENT_SUMMARY 1
+// print the tick value for each ADC read
+#define PRINT_ALL_SAMPLES 0
 
-// number of readings to take for averaging
-const int READS_PER_MEASUREMENT = 500;
+// delay (in ms) between iterations of the channel scan
+const int ITERATION_DELAY = 60 * 1000; // ms
 
 // delay (in ms) after selecting a channel and first reading it
 // I don't know if this "settling time" is necessary
@@ -39,10 +42,21 @@ const int PRE_MEASUREMENT_DELAY = 100; // ms
 
 // we're going to take a bunch of samples, but we are really fast
 // so sleep between samples.
-const int INTRA_MEASUREMENT_DELAY = 1; // ms
+// Sampling theorem: Need to sample at least 2x the frequency.
+// Frequency (North America) is 60 Hz, which is 16.67 ms per cycle.
+// 16.67 / 120samples == 0.139 ms/sample, 139 us/sample. Rounding
+// down to 100 us/sample to allow for the physical world.
+// (The same calculation for 50 Hz gives 167 us/sample, so we're 
+// OK there if we aim for 60 Hz.)
+const int INTRA_MEASUREMENT_DELAY = 100; // microseconds
 
-// delay (in ms) between iterations of the channel scan
-const int ITERATION_DELAY = 60 * 1000; // ms
+// number of readings to take for averaging
+// I want a bit more than one cycle; 16.67ms for 60 Hz, 20ms for 50 Hz
+// If you go for many cycles, you risk the chance of picking up an outlier
+// min or max reading
+const int DURATION_OF_MEASUREMENT = 21000; // microseconds
+
+const int READS_PER_MEASUREMENT = DURATION_OF_MEASUREMENT / INTRA_MEASUREMENT_DELAY;
 
 typedef struct 
 {
@@ -85,20 +99,24 @@ typedef struct
   int ticks_minimum;   // ADC measured during sampling
   int ticks_average;   // ADC measured during sampling
   int ticks_maximum;   // ADC measured during sampling
-  float threshold_for_off; // values below this mean the device is off
-  float threshold_for_on;  // values above this mean the device is on
-  int on_off_virtual_pin;  // use this fake pin to tell Cayenne off or on
+  float threshold_for_off;    // values below this mean the device is off
+  float threshold_for_on;     // values above this mean the device is on
+  int ac_voltage_virtual_pin; // calculated AC Vrms
+  int on_off_virtual_pin;     // use this fake pin to tell Cayenne off or on
+  int ticks_min_virtual_pin;  // actual value read from the ADC
+  int ticks_ave_virtual_pin;  // actual value read from the ADC
+  int ticks_max_virtual_pin;  // actual value read from the ADC
 } CHANNEL;
 
-const int VIRTUAL_ON    =  1;
-const int VIRTUAL_OFF   = -1;
+const int VIRTUAL_ON    =  2;
+const int VIRTUAL_OFF   = -2;
 const int VIRTUAL_TWEEN =  0;
 
 // for the current project, there are 4 possible inputs, but I am only using 2
-static CHANNEL c0  = { 0, "washer",     ac_input_4, ac_mux_pin_0,  dc_mux_pin_0,  409, 0,0,0, 1.0,4.0, 20};
-static CHANNEL c4  = { 4, "channel 4",  ac_input_4, ac_mux_pin_4,  dc_mux_pin_4,  409, 0,0,0, 1.0,4.0, 24};
-static CHANNEL c8  = { 8, "dryer",      ac_input_5, ac_mux_pin_8,  dc_mux_pin_8,  409, 0,0,0, 1.0,4.0, 28};
-static CHANNEL c12 = {12, "channel 12", ac_input_5, ac_mux_pin_12, dc_mux_pin_12, 409, 0,0,0, 1.0,4.0, 32};
+static CHANNEL c0  = { 0, "washer",     ac_input_4, ac_mux_pin_0,  dc_mux_pin_0,  409, 0,0,0, 1.0,4.0, 30,20,40,50,60};
+static CHANNEL c4  = { 4, "channel 4",  ac_input_4, ac_mux_pin_4,  dc_mux_pin_4,  409, 0,0,0, 1.0,4.0, 34,24,44,54,64};
+static CHANNEL c8  = { 8, "dryer",      ac_input_5, ac_mux_pin_8,  dc_mux_pin_8,  409, 0,0,0, 1.0,4.0, 38,28,48,58,68};
+static CHANNEL c12 = {12, "channel 12", ac_input_5, ac_mux_pin_12, dc_mux_pin_12, 409, 0,0,0, 1.0,4.0, 42,32,52,62,72};
 
 static CHANNEL channels[] = {c0, c8};
 const int CHANNEL_COUNT = sizeof(channels)/sizeof(channels[0]);
@@ -140,7 +158,7 @@ void loop()
   digitalWrite(ledPin, LED_ON); // just for fun, turn LED on while measuring
   for (int channelDex=0; channelDex<CHANNEL_COUNT; ++channelDex)
   {
-#ifdef CONSOLE_OUTPUT    
+#if PRINT_MEASUREMENT_SUMMARY
     if (channelDex == 0) Serial.println();
 #endif
     CHANNEL thisChannel = channels[channelDex];
@@ -158,14 +176,23 @@ void measure_one_channel(CHANNEL *thisChannel)
   int total = 0;
   int min = 1025;
   int max = -1;
+#if PRINT_ALL_SAMPLES
+  Serial.println();
+#endif
   for (int ii=0; ii<READS_PER_MEASUREMENT; ++ii)
   {
     int adcValue = analogRead(adcPin);
+#if PRINT_ALL_SAMPLES
+    Serial.print(adcValue); Serial.print(" ");
+#endif
     if (adcValue < min) min = adcValue;
     if (adcValue > max) max = adcValue;
     total += adcValue;
-    if (INTRA_MEASUREMENT_DELAY > 0) delay(INTRA_MEASUREMENT_DELAY);
+    if (INTRA_MEASUREMENT_DELAY > 0) delayMicroseconds(INTRA_MEASUREMENT_DELAY);
   }
+#if PRINT_ALL_SAMPLES
+  Serial.println();
+#endif
   thisChannel->ticks_average = ( total + (READS_PER_MEASUREMENT / 2) ) / READS_PER_MEASUREMENT;
   thisChannel->ticks_minimum = min;
   thisChannel->ticks_maximum = max;
@@ -193,7 +220,11 @@ void process_channel_results(CHANNEL *thisChannel)
   float acCurrent = AC_millivolts_to_AC_amps(thisChannel, acVoltage);
 
   Cayenne.virtualWrite(thisChannel->mux_pin, acCurrent);
-  int state; // -1 is off, +1 is on, 0 is in between
+  Cayenne.virtualWrite(thisChannel->ac_voltage_virtual_pin, acVoltage);
+  Cayenne.virtualWrite(thisChannel->ticks_min_virtual_pin, thisChannel->ticks_minimum);
+  Cayenne.virtualWrite(thisChannel->ticks_ave_virtual_pin, thisChannel->ticks_average);
+  Cayenne.virtualWrite(thisChannel->ticks_max_virtual_pin, thisChannel->ticks_maximum);
+  int state; // -2 is off, +1 is on, 0 is in between
   if (acCurrent <= thisChannel->threshold_for_off)
   {
     state = VIRTUAL_OFF;
@@ -208,7 +239,7 @@ void process_channel_results(CHANNEL *thisChannel)
   }
   Cayenne.virtualWrite(thisChannel->on_off_virtual_pin, state);
 
-#ifdef CONSOLE_OUTPUT
+#if PRINT_MEASUREMENT_SUMMARY
   // if this were time-critical or if I needed the TX/RX pins
   // for something, I would not do the console output
   // handy during development, though
@@ -253,6 +284,8 @@ float ticks_to_AC_millivolts(CHANNEL *thisChannel)
   float slope     = thisChannel->ticks_vs_ac_mv.slope;
   float intercept = thisChannel->ticks_vs_ac_mv.intercept;
   float mV = (ticks - intercept) / slope;
+  // convert to rms
+  mV = mV / 0.7071;
   if (mV < 0) mV = 0;
   return mV;
 }
