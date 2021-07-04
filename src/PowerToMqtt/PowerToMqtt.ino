@@ -1,0 +1,449 @@
+/*
+ * This is part of a current measuring project. See here for more
+ * explanation: https://www.hackster.io/wjcarpenter/iot-power-strip-fb6c8b
+ *
+ * This particular code removes all links to Cayenne and instead
+ * sends data to MQTT in topics compatible with Home Assistant
+ * autodiscovery.
+ * 
+ * Iterate over all input channels, average a bunch of reads from each.
+ * Send the AC voltage results to MQTT, channel for channel.
+ * Print results to the console for local monitoring.
+ */
+
+#include <ESP8266WiFi.h>
+#include "Adafruit_MQTT.h"
+#include "Adafruit_MQTT_Client.h"
+
+// config start -------------------------------------
+
+// WiFi network info.
+#if 0
+#else
+#define WIFI_SSID "WIFI_SSID"
+#define WIFI_PASSWORD "wifi password"
+#define MQTT_SERVER ""
+#define MQTT_PORT 1883
+#define MQTT_USER ""
+#define MQTT_PASSWORD ""
+
+#endif
+
+// config end   -------------------------------------
+
+/************ Global State (based on Adafruit MQTT library example code. */
+// Create an ESP8266 WiFiClient class to connect to the MQTT server.
+WiFiClient client;
+// Setup the MQTT client class by passing in the WiFi client and MQTT server and login details.
+Adafruit_MQTT_Client mqtt(&client, MQTT_SERVER, MQTT_PORT, MQTT_USER, MQTT_PASSWORD);
+
+// Setup topics for publishing.
+// The "dev_1" is for "device 1", in case I ever have more of these hanging around.
+Adafruit_MQTT_Publish entity_ch0  = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/dev_1/acv_ch_0/state");
+Adafruit_MQTT_Publish entity_ch4  = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/dev_1/acv_ch_4/state");
+Adafruit_MQTT_Publish entity_ch8  = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/dev_1/acv_ch_8/state");
+Adafruit_MQTT_Publish entity_ch12 = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/dev_1/acv_ch_12/state");
+
+/*************************** Sketch Code ************************************/
+
+// Bug workaround for Arduino 1.6.6, it seems to need a function declaration
+// for some reason (only affects ESP8266, likely an arduino-builder bug).
+void MQTT_connect();
+
+// one-liner calculated values for each measurement chunk
+#define PRINT_MEASUREMENT_SUMMARY 1
+// print the tick value for each ADC read
+#define PRINT_ALL_SAMPLES 0
+
+// delay (in ms) between iterations of the channel scan
+const int ITERATION_DELAY = 60 * 1000; // ms
+
+// delay (in ms) after selecting a channel and first reading it
+// I don't know if this "settling time" is necessary
+const int PRE_MEASUREMENT_DELAY = 100; // ms
+
+// we're going to take a bunch of samples, but we are really fast
+// so sleep between samples.
+// Sampling theorem: Need to sample at least 2x the frequency.
+// Frequency (North America) is 60 Hz, which is 16.67 ms per cycle.
+// 16.67 / 120samples == 0.139 ms/sample, 139 us/sample. Rounding
+// down to 100 us/sample to allow for the physical world.
+// (The same calculation for 50 Hz gives 167 us/sample, so we're 
+// OK there if we aim for 60 Hz.)
+const int INTRA_MEASUREMENT_DELAY = 100; // microseconds
+
+// number of readings to take for averaging
+// I want a bit more than one cycle; 16.67ms for 60 Hz, 20ms for 50 Hz
+// If you go for many cycles, you risk the chance of picking up an outlier
+// min or max reading
+const int DURATION_OF_MEASUREMENT = 21000; // microseconds
+
+const int READS_PER_MEASUREMENT = DURATION_OF_MEASUREMENT / INTRA_MEASUREMENT_DELAY;
+
+typedef struct 
+{
+  float slope; 
+  float intercept;
+} LINE;  // you know: y = mx + b
+
+// these are AC amps (x axis), AC rms mV (y axis)
+// in theory, these should all be the same, but they can be slightly different due to physics
+static LINE ac_input_1 {24.1, -1.09};
+static LINE ac_input_2 {24.1, -1.09};
+static LINE ac_input_3 {24.1, -1.09};
+static LINE ac_input_4 {24.1, -1.09};
+static LINE ac_input_5 {24.1, -1.09};
+
+// these are AC rms mV (x axis), ticks (y axis)
+// in theory, these should all be the same, but they can be slightly different due to physics
+static LINE ac_mux_pin_0  {1.25, 6.15};
+static LINE ac_mux_pin_4  {1.25, 6.18};
+static LINE ac_mux_pin_8  {1.27, 3.79};
+static LINE ac_mux_pin_12 {1.26, 3.67};
+
+// these are DC mV (x axis), ticks (y axis)
+// in theory, these should all be the same, but they acan be slightly different due to physics
+static LINE dc_mux_pin_0  {0.946, 415};
+static LINE dc_mux_pin_4  {0.944, 419};
+static LINE dc_mux_pin_8  {0.945, 418};
+static LINE dc_mux_pin_12 {0.944, 423};
+
+typedef enum {ON=2, OFF=-2, MIDDLE=0} ON_OFF_STATE;
+
+// it's hard to avoid using overloaded terminology
+// a "channel" is a path all the way from the AC current source to the ADC pin
+typedef struct
+{
+  int mux_pin;         // the input pin/channel on the multiplexer chip
+  char *name;          // we're all human
+  Adafruit_MQTT_Publish *state_topic; // MQTT
+
+  LINE ac_mv_vs_amps;  // the AC input geometry
+  LINE ticks_vs_ac_mv; // the mux pin AC geometry
+  LINE ticks_vs_dc_mv; // the mux pin DC geometry
+  int ticks_dc_bias;   // not used in the current code
+
+  int ticks_minimum;   // ADC measured during sampling
+  int ticks_average;   // ADC measured during sampling
+  int ticks_maximum;   // ADC measured during sampling
+
+  ON_OFF_STATE state;         // is we is, or is we ain't?
+  long last_state_change;     // seconds
+  float threshold_for_off;    // values below this mean the device is off
+  float threshold_for_on;     // values above this mean the device is on
+  int seconds_for_off;        // how long must it be off before we believe it?
+  int seconds_for_on;         // likewise, for believing on?
+
+  int ac_voltage_virtual_pin; // calculated AC Vrms
+  int on_off_virtual_pin;     // use this fake pin to tell Cayenne off or on
+  int ticks_min_virtual_pin;  // actual value read from the ADC
+  int ticks_ave_virtual_pin;  // actual value read from the ADC
+  int ticks_max_virtual_pin;  // actual value read from the ADC
+} CHANNEL;
+
+// for the current project, there are 4 possible inputs, but I am only using 2
+static CHANNEL c0  = { 0, "washer",     &entity_ch0,  ac_input_4, ac_mux_pin_0,  dc_mux_pin_0,  409, 0,0,0, MIDDLE,0, 1.0,4.0,360,60, 30,20,40,50,60};
+static CHANNEL c4  = { 4, "channel_4",  &entity_ch4,  ac_input_4, ac_mux_pin_4,  dc_mux_pin_4,  409, 0,0,0, MIDDLE,0, 1.0,4.0,0,0,    34,24,44,54,64};
+static CHANNEL c8  = { 8, "dryer",      &entity_ch8,  ac_input_5, ac_mux_pin_8,  dc_mux_pin_8,  409, 0,0,0, MIDDLE,0, 1.0,4.0,60,60,  38,28,48,58,68};
+static CHANNEL c12 = {12, "channel_12", &entity_ch12, ac_input_5, ac_mux_pin_12, dc_mux_pin_12, 409, 0,0,0, MIDDLE,0, 1.0,4.0,0,0,    42,32,52,62,72};
+
+static CHANNEL channels[] = {c0, c4, c8, c12};
+const int CHANNEL_COUNT = sizeof(channels)/sizeof(channels[0]);
+
+const int adcPin = A0;        // input pin for the ADC signal
+const int ledPin = LED_BUILTIN;  // output pin for the LED
+const int LED_ON = LOW;
+const int LED_OFF = HIGH;
+// the mux uses active high for the address lines
+const int ADDRESS_LINE_SELECTED = HIGH;
+const int ADDRESS_LINE_DESELECTED = LOW;
+
+// these are the 4 pins used for address lines from the ESP32 to the multiplexer
+// they correspond to            s0,s1,s2, s3   on the mux
+const int MUX_ADDRESS_LINES[] = {0, 4, 13, 12};
+const int MUX_ADDRESS_LINE_COUNT = sizeof(MUX_ADDRESS_LINES) / sizeof(MUX_ADDRESS_LINES[0]);
+
+void setup() 
+{
+  // declare the ledPin as an OUTPUT:
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(ledPin, LED_OFF);
+
+  Serial.begin(115200);
+
+  // Connect to WiFi access point.
+  Serial.println(); Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(WIFI_SSID);
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+  Serial.println("WiFi connected");
+  Serial.println("IP address: "); Serial.println(WiFi.localIP());
+
+  for (int ii=0; ii<MUX_ADDRESS_LINE_COUNT; ++ii)
+  {
+    int thisPin = MUX_ADDRESS_LINES[ii];
+    pinMode(thisPin, OUTPUT);
+    digitalWrite(thisPin, LOW); // not really required, just for safety
+  }
+}
+
+
+uint32_t x=0;
+
+void loopX() {
+  // Ensure the connection to the MQTT server is alive (this will make the first
+  // connection and automatically reconnect when disconnected).  See the MQTT_connect
+  // function definition further below.
+  MQTT_connect();
+
+  // Now we can publish stuff!
+  Serial.print(F("\nSending entity_dummy val "));
+  Serial.print(x);
+  Serial.print("...");
+  if (! entity_ch0.publish(x++)) {
+    Serial.println(F("Failed"));
+  } else {
+    Serial.println(F("OK!"));
+  }
+  delay(5*1000);
+  // ping the server to keep the mqtt connection alive
+  // NOT required if you are publishing once every KEEPALIVE seconds
+  /*
+  if(! mqtt.ping()) {
+    mqtt.disconnect();
+  }
+  */
+}
+
+// Function to connect and reconnect as necessary to the MQTT server.
+// Should be called in the loop function and it will take care if connecting.
+void MQTT_connect() {
+  int8_t ret;
+
+  // Stop if already connected.
+  if (mqtt.connected()) {
+    return;
+  }
+
+  Serial.print("Connecting to MQTT... ");
+
+  uint8_t retries = 3;
+  while ((ret = mqtt.connect()) != 0) { // connect will return 0 for connected
+       Serial.println(mqtt.connectErrorString(ret));
+       Serial.println("Retrying MQTT connection in 5 seconds...");
+       mqtt.disconnect();
+       delay(5000);  // wait 5 seconds
+       retries--;
+       if (retries == 0) {
+         // basically die and wait for WDT to reset me
+         while (1);
+       }
+  }
+  Serial.println("MQTT Connected!");
+}
+
+
+static long previous_now = 0;
+void loop() 
+{
+  // Ensure the connection to the MQTT server is alive (this will make the first
+  // connection and automatically reconnect when disconnected).  See the MQTT_connect
+  // function definition further below.
+  MQTT_connect();
+  digitalWrite(ledPin, LED_ON); // just for fun, turn LED on while measuring
+  for (int channelDex=0; channelDex<CHANNEL_COUNT; ++channelDex)
+  {
+#if PRINT_MEASUREMENT_SUMMARY
+    if (channelDex == 0) 
+    {
+      Serial.println();
+      long now = get_sorta_time_seconds();
+      Serial.print(now); Serial.print(" ");Serial.println(now - previous_now);
+      previous_now = now;
+    }
+#endif
+    CHANNEL thisChannel = channels[channelDex];
+    measure_one_channel(&thisChannel);
+    process_channel_results(&thisChannel);
+  }
+  digitalWrite(ledPin, LED_OFF);
+  delay(ITERATION_DELAY);
+}
+
+void measure_one_channel(CHANNEL *thisChannel)
+{
+  select_a_mux_pin(thisChannel->mux_pin);
+  delay(PRE_MEASUREMENT_DELAY);
+  int total = 0;
+  int min = 1025;
+  int max = -1;
+#if PRINT_ALL_SAMPLES
+  Serial.println();
+#endif
+  for (int ii=0; ii<READS_PER_MEASUREMENT; ++ii)
+  {
+    int adcValue = analogRead(adcPin);
+#if PRINT_ALL_SAMPLES
+    Serial.print(adcValue); Serial.print(" ");
+#endif
+    if (adcValue < min) min = adcValue;
+    if (adcValue > max) max = adcValue;
+    total += adcValue;
+    if (INTRA_MEASUREMENT_DELAY > 0) delayMicroseconds(INTRA_MEASUREMENT_DELAY);
+  }
+#if PRINT_ALL_SAMPLES
+  Serial.println();
+#endif
+  thisChannel->ticks_average = ( total + (READS_PER_MEASUREMENT / 2) ) / READS_PER_MEASUREMENT;
+  thisChannel->ticks_minimum = min;
+  thisChannel->ticks_maximum = max;
+}
+
+void select_a_mux_pin(int mux_pin)
+{
+  for (int ii=0; ii<MUX_ADDRESS_LINE_COUNT; ++ii)
+  {
+    if (((mux_pin>>ii) & 0x1) == 0x1)
+    {
+      digitalWrite(MUX_ADDRESS_LINES[ii], ADDRESS_LINE_SELECTED);
+    }
+    else
+    {
+      digitalWrite(MUX_ADDRESS_LINES[ii], ADDRESS_LINE_DESELECTED);
+    }
+  }
+}
+
+void process_channel_results(CHANNEL *thisChannel)
+{
+  float dcVoltage = ticks_to_DC_millivolts(thisChannel);
+  float acVoltage = ticks_to_AC_millivolts(thisChannel);
+  float acCurrent = AC_millivolts_to_AC_amps(thisChannel, acVoltage);
+
+  // Cayenne.virtualWrite(thisChannel->mux_pin, acCurrent);
+  // Cayenne.virtualWrite(thisChannel->ac_voltage_virtual_pin, acVoltage);
+  // Cayenne.virtualWrite(thisChannel->ticks_min_virtual_pin, thisChannel->ticks_minimum);
+  // Cayenne.virtualWrite(thisChannel->ticks_ave_virtual_pin, thisChannel->ticks_average);
+  // Cayenne.virtualWrite(thisChannel->ticks_max_virtual_pin, thisChannel->ticks_maximum);
+  Serial.println("sending mqtt");
+  thisChannel->state_topic->publish(acVoltage);
+  //entity_ch0.publish(acVoltage);
+
+  ON_OFF_STATE new_state = MIDDLE; // this shouldn't happen except at startup or an unlucky edge measurement
+  if (acCurrent <= thisChannel->threshold_for_off)
+  {
+    new_state = OFF;
+  }
+  else if (acCurrent >= thisChannel->threshold_for_on)
+  {
+    new_state = ON;
+  }
+  ON_OFF_STATE channelState = thisChannel->state;
+  if (new_state != thisChannel->state)
+  {
+    long now = get_sorta_time_seconds();
+    long delta = now -thisChannel->last_state_change;
+    // The millis() function wraps around every 50 days or so, at which
+    // time the delta will be a large negative number. Adjust for that.
+    // If we miss a state change, we'll get it on a future next iteration.
+    // So, every couple of months, there is a potential for a state change
+    // being delayed ... as much as double the configured delay.
+    if (delta < 0)
+    {
+      delta = 0;
+      thisChannel->last_state_change = now;
+    }
+    if ((new_state == ON  &&  delta >= thisChannel->seconds_for_on)
+    ||  (new_state == OFF &&  delta >= thisChannel->seconds_for_off))
+    {
+      thisChannel->state = new_state;
+      thisChannel->last_state_change = now;
+    }
+  }
+  // Cayenne.virtualWrite(thisChannel->on_off_virtual_pin, thisChannel->state);
+
+#if PRINT_MEASUREMENT_SUMMARY
+  // if this were time-critical or if I needed the TX/RX pins
+  // for something, I would not do the console output
+  // handy during development, though
+  Serial.print("ch ");
+  Serial.print(thisChannel->mux_pin);
+  Serial.print(" ");
+  Serial.print(thisChannel->name);
+  Serial.print(": min=");
+  Serial.print(thisChannel->ticks_minimum);
+  Serial.print(", ave=");
+  Serial.print(thisChannel->ticks_average);
+  Serial.print(", max=");
+  Serial.print(thisChannel->ticks_maximum);
+  Serial.print(", measure DC=");
+  Serial.print(dcVoltage);
+  Serial.print(" mV, AC=");
+  Serial.print(acVoltage);
+  Serial.print(" mV, ");
+  Serial.print(acCurrent);
+  Serial.print(" amps,  ");
+  Serial.print(thisChannel->state);
+  Serial.println();
+#endif  
+}
+
+// ticks = (slope * mv) + intercept
+// (ticks - intercept) / slope = mv
+float ticks_to_DC_millivolts(CHANNEL *thisChannel)
+{
+  int ticks       = thisChannel->ticks_average;
+  float slope     = thisChannel->ticks_vs_dc_mv.slope;
+  float intercept = thisChannel->ticks_vs_dc_mv.intercept;
+  float mV = (ticks - intercept) / slope;
+  if (mV < 0) mV = 0;
+  return mV;
+}
+
+// ticks = (slope * mv) + intercept
+// (ticks - intercept) / slope = mv
+float ticks_to_AC_millivolts(CHANNEL *thisChannel)
+{
+  // A more accurate way to do this would be to record all of the sample
+  // points and then best-fit a sinusoidal wave regression to those points.
+  // Then use the amplitude of that sine wave as the peak. 
+  //
+  // Simpler to just take the observed maximum as the amplitude (subtracting
+  // out the observed average, which ought to be "zero" [the DC bias built
+  // into the circuit]). The only problem is if the signal is noisy. Then the
+  // observed maximum could be an outlier, and the amplitude would be too high.
+
+  int ticks       = thisChannel->ticks_maximum - thisChannel->ticks_average;
+  float slope     = thisChannel->ticks_vs_ac_mv.slope;
+  float intercept = thisChannel->ticks_vs_ac_mv.intercept;
+  float mV = (ticks - intercept) / slope;
+  // convert to rms (Vpeak / sqrt(2))
+  mV = mV * 0.7071;
+  if (mV < 0) mV = 0;
+  return mV;
+}
+
+// mv = (slope * amps) + intercept
+// (mv - intercept) / slope = amps
+float AC_millivolts_to_AC_amps(CHANNEL *thisChannel, float acVoltage)
+{
+  float slope     = thisChannel->ac_mv_vs_amps.slope;
+  float intercept = thisChannel->ac_mv_vs_amps.intercept;
+  float acCurrent = (acVoltage - intercept) / slope;
+  if (acCurrent < 0.1) acCurrent = 0; // very low currents are inaccurate
+  return acCurrent;
+}
+
+// only approximately correct since millis() is only approximately correct
+long get_sorta_time_seconds()
+{
+  long sorta_millis = millis();
+  return (sorta_millis + 500) / 1000;
+}
+
