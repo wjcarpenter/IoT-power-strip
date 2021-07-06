@@ -4,33 +4,31 @@
  *
  * This particular code removes all links to Cayenne and instead
  * sends data to MQTT in topics compatible with Home Assistant
- * autodiscovery.
+ * autodiscovery. If you don't use HA or care about HA autodiscovery,
+ * no matter. That will just be a few messages that go to MQTT for
+ * nobody to listen to.
  * 
  * Iterate over all input channels, average a bunch of reads from each.
- * Send the AC voltage results to MQTT, channel for channel.
+ * Send the AC voltage results and friends to MQTT, channel for channel.
  * Print results to the console for local monitoring.
  */
 
-#include <ESP8266WiFi.h>
-#include "Adafruit_MQTT.h"
-#include "Adafruit_MQTT_Client.h"
+#include "EspMQTTClient.h"
 
 // config start -------------------------------------
 
 // WiFi and MQTT network info.
-#if 1
+#if 0
 
-#define WIFI_SSID "Bothless"
-#define WIFI_PASSWORD "98011=98011"
-#define MQTT_SERVER "mqtt.carpenter.org"
-#define MQTT_USER "powerwatcher"
-#define MQTT_PASSWORD "hunter2hunter3"
 #else
 #define WIFI_SSID "WIFI_SSID"
 #define WIFI_PASSWORD "wifi password"
 #define MQTT_SERVER "MQTT server name or address"
 #define MQTT_USER "MQTT user/client ID"
 #define MQTT_PASSWORD "MQTT password/token"
+#define OTA_USER "for OTA updates; #undef to disable"
+//#undef OTA_USER
+#define OTA_PASSWORD "for OTA updates"
 
 #endif
 
@@ -73,28 +71,16 @@ const int DURATION_OF_MEASUREMENT = 21000; // microseconds
 
 const int READS_PER_MEASUREMENT = DURATION_OF_MEASUREMENT / INTRA_MEASUREMENT_DELAY;
 
-/************ Global State (based on Adafruit MQTT library example code. */
-// Create an ESP8266 WiFiClient class to connect to the MQTT server.
-WiFiClient client;
-// Setup the MQTT client class by passing in the WiFi client and MQTT server and login details.
-Adafruit_MQTT_Client mqtt(&client, MQTT_SERVER, MQTT_PORT, MQTT_USER, MQTT_PASSWORD);
-
-// Setup topics for publishing.
-// The DEVICE_ID is in case I ever have more of these hanging around.
-Adafruit_MQTT_Publish acmV_entity_ch0  = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/" DEVICE_ID "/ch0_ac_mV_rms/state");
-Adafruit_MQTT_Publish acmV_entity_ch4  = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/" DEVICE_ID "/ch4_ac_mV_rms/state");
-Adafruit_MQTT_Publish acmV_entity_ch8  = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/" DEVICE_ID "/ch8_ac_mV_rms/state");
-Adafruit_MQTT_Publish acmV_entity_ch12 = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/" DEVICE_ID "/ch12_ac_mV_rms/state");
-
-Adafruit_MQTT_Publish acA_entity_ch0  = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/" DEVICE_ID "/ch0_ac_amps/state");
-Adafruit_MQTT_Publish acA_entity_ch4  = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/" DEVICE_ID "/ch4_ac_amps/state");
-Adafruit_MQTT_Publish acA_entity_ch8  = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/" DEVICE_ID "/ch8_ac_amps/state");
-Adafruit_MQTT_Publish acA_entity_ch12 = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/" DEVICE_ID "/ch12_ac_amps/state");
-
-Adafruit_MQTT_Publish onoff_entity_ch0  = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/" DEVICE_ID "/ch0_onoff/state");
-Adafruit_MQTT_Publish onoff_entity_ch4  = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/" DEVICE_ID "/ch4_onoff/state");
-Adafruit_MQTT_Publish onoff_entity_ch8  = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/" DEVICE_ID "/ch8_onoff/state");
-Adafruit_MQTT_Publish onoff_entity_ch12 = Adafruit_MQTT_Publish(&mqtt, "powerwatcher/" DEVICE_ID "/ch12_onoff/state");
+//EspMQTTClient mqtt(WIFI_SSID, WIFI_PASSWORD, MQTT_SERVER, MQTT_USER, MQTT_PASSWORD, MQTT_USER, MQTT_PORT);
+EspMQTTClient mqtt(
+  "Bothless",
+  "98011=98011",
+  "mqtt.carpenter.org",  // MQTT Broker server ip
+  "powerwatcher",   // Can be omitted if not needed
+  "hunter2hunter3",   // Can be omitted if not needed
+  "TestClient",     // Client name that uniquely identify your device
+  1883              // The MQTT port, default to 1883. this line can be omitted
+);
 
 typedef struct 
 {
@@ -132,9 +118,6 @@ typedef struct
 {
   int mux_pin;         // the input pin/channel on the multiplexer chip
   char *name;          // we're all human
-  Adafruit_MQTT_Publish *acmV_topic;  // MQTT
-  Adafruit_MQTT_Publish *acA_topic;   // MQTT
-  Adafruit_MQTT_Publish *onoff_topic; // MQTT
 
   LINE ac_mv_vs_amps;  // the AC input geometry
   LINE ticks_vs_ac_mv; // the mux pin AC geometry
@@ -156,7 +139,6 @@ typedef struct
 // for the current project, there are 4 possible inputs, but I am only using 2
 static CHANNEL c0  = {
 		      0, "washer",
-		      &acmV_entity_ch0,  &acA_entity_ch0,  &onoff_entity_ch0,
 		      ac_input_4, ac_mux_pin_0,  dc_mux_pin_0, 409,
 		      0,0,0,
 		      MIDDLE,0,
@@ -164,7 +146,6 @@ static CHANNEL c0  = {
 };
 static CHANNEL c4  = {
 		      4, "channel 4",
-		      &acmV_entity_ch4,  &acA_entity_ch4,  &onoff_entity_ch4,
 		      ac_input_4, ac_mux_pin_4,  dc_mux_pin_4, 409,
 		      0,0,0,
 		      MIDDLE,0,
@@ -172,7 +153,6 @@ static CHANNEL c4  = {
 };
 static CHANNEL c8  = {
 		      8, "dryer",
-		      &acmV_entity_ch8,  &acA_entity_ch8,  &onoff_entity_ch8,
 		      ac_input_5, ac_mux_pin_8,  dc_mux_pin_8, 409,
 		      0,0,0,
 		      MIDDLE,0,
@@ -180,7 +160,6 @@ static CHANNEL c8  = {
 };
 static CHANNEL c12 = {
 		      12, "channel 12",
-		      &acmV_entity_ch12, &acA_entity_ch12, &onoff_entity_ch12,
 		      ac_input_5, ac_mux_pin_12, dc_mux_pin_12, 409,
 		      0,0,0,
 		      MIDDLE,0,
@@ -204,6 +183,20 @@ const int MUX_ADDRESS_LINES[] = {0, 4, 13, 12};
 const int MUX_ADDRESS_LINE_COUNT = sizeof(MUX_ADDRESS_LINES) / sizeof(MUX_ADDRESS_LINES[0]);
 
 void
+mqtt_setup()
+{
+  mqtt.enableDebuggingMessages(true);
+  mqtt.enableMQTTPersistence();
+  mqtt.setKeepAlive((2 * ITERATION_DELAY) / 1000);
+  mqtt.setMaxPacketSize(500);
+  mqtt.setWifiReconnectionAttemptDelay(5 * 1000);
+  mqtt.setMqttReconnectionAttemptDelay(5 * 1000);
+#ifdef OTA_USER
+  mqtt.enableHTTPWebUpdater(OTA_USER, OTA_PASSWORD);
+#endif
+}
+
+void
 setup() 
 {
   // declare the ledPin as an OUTPUT:
@@ -211,18 +204,8 @@ setup()
   digitalWrite(ledPin, LED_OFF);
 
   Serial.begin(115200);
+  mqtt_setup();
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println();
-  Serial.println("WiFi connected");
-  Serial.println("IP address: "); Serial.println(WiFi.localIP());
-
-  ha_sensor_configs();
-  
   for (int ii=0; ii<MUX_ADDRESS_LINE_COUNT; ++ii)
   {
     int thisPin = MUX_ADDRESS_LINES[ii];
@@ -232,43 +215,12 @@ setup()
 
 }
 
-// Function to connect and reconnect as necessary to the MQTT server.
-// Should be called in the loop function and it will take care if connecting.
-// Default keep-alive is 5 minutes, so should stay connected.
-void
-MQTT_connect() {
-  int8_t ret;
-
-  // Stop if already connected.
-  if (mqtt.connected()) {
-    return;
-  }
-
-  Serial.print("Connecting to MQTT... ");
-
-  uint8_t retries = 3;
-  while ((ret = mqtt.connect()) != 0) { // connect will return 0 for connected
-       Serial.println(mqtt.connectErrorString(ret));
-       Serial.println("Retrying MQTT connection in 5 seconds...");
-       mqtt.disconnect();
-       delay(5000);  // wait 5 seconds
-       retries--;
-       if (retries == 0) {
-         // basically die and wait for WDT to reset me
-         while (1);
-       }
-  }
-  Serial.println("MQTT Connected!");
-}
 
 static long previous_now = 0;
 void
 loop() 
 {
-  // Ensure the connection to the MQTT server is alive (this will make the first
-  // connection and automatically reconnect when disconnected).  See the MQTT_connect
-  // function definition further below.
-  MQTT_connect();
+  mqtt.loop();
 
   digitalWrite(ledPin, LED_ON); // just for fun, turn LED on while measuring
   for (int channelDex=0; channelDex<CHANNEL_COUNT; ++channelDex)
@@ -488,7 +440,8 @@ static const char *sensorPayloadFormat =
   "  \"value_template\": \"{{value_json.%s}}\","
   "  \"device\":"
   "  {"
-  "    \"name\":\"" DEVICE_ID "_powerwatcher\""
+  "    \"name\":\"" DEVICE_ID "_powerwatcher\","
+  "    \"identifiers\":\"" DEVICE_ID "_powerwatcher\""
   "  }"
   "}";
 
@@ -501,7 +454,8 @@ static const char *binarySensorPayloadFormat =
   "  \"payload_on\": \"on\", \"payload_off\": \"off\","
   "  \"device\":"
   "  {"
-  "    \"name\":\"" DEVICE_ID "_powerwatcher\""
+  "    \"name\":\"" DEVICE_ID "_powerwatcher\","
+  "    \"identifiers\":\"" DEVICE_ID "_powerwatcher\""
   "  }"
   "}";
      
@@ -509,7 +463,7 @@ static const char *binarySensorPayloadFormat =
 void
 ha_sensor_config_one_channel(CHANNEL *thisChannel)
 {
-  MQTT_connect();
+  //mqtt.loop();
 
   int chnum = thisChannel->mux_pin;
   char ha_topic[100];
@@ -525,7 +479,7 @@ ha_sensor_config_one_channel(CHANNEL *thisChannel)
 	   chnum, "acmvrms", /* uniqueId */
 	   "mvrms"); /* value template */
   Serial.println(payload);
-  mqtt.publish(ha_topic, payload);
+  mqtt.publish(ha_topic, payload, true);
 
   snprintf(ha_topic, sizeof(ha_topic), "homeassistant/sensor/" DEVICE_ID "/ch%d_ac_amps/config", chnum);
   snprintf(payload, sizeof(payload), sensorPayloadFormat,
@@ -535,7 +489,7 @@ ha_sensor_config_one_channel(CHANNEL *thisChannel)
 	   chnum, "acamps", /* uniqueId */
 	   "amps"); /* value template */
   Serial.println(payload);
-  mqtt.publish(ha_topic, payload);
+  mqtt.publish(ha_topic, payload, true);
 
   snprintf(ha_topic, sizeof(ha_topic), "homeassistant/binary_sensor/" DEVICE_ID "/ch%d_onoff/config", chnum);
   snprintf(payload, sizeof(payload), binarySensorPayloadFormat,
@@ -544,5 +498,12 @@ ha_sensor_config_one_channel(CHANNEL *thisChannel)
 	   chnum, "onoff", /* uniqueId */
 	   "onoff"); /* value template */
   Serial.println(payload);
-  mqtt.publish(ha_topic, payload);
+  mqtt.publish(ha_topic, payload, true);
+}
+
+void
+onConnectionEstablished()
+{
+  Serial.println("MQTT connection established");
+  ha_sensor_configs();
 }

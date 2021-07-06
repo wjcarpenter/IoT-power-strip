@@ -14,7 +14,12 @@ In particular, I now run a Home Assistant (https://www.home-assistant.io/) serve
 where I do many integrations using a Mosquitto (https://mosquitto.org/) MQTT server.
 It therefore seemed natural to convert this project to use generic MQTT.
 You can find that in the Arduino sketch PowerToMqtt.ino.
-I use the Adafruit MQTT library (https://github.com/adafruit/Adafruit_MQTT_Library).
+I originally used the Adafruit MQTT library (https://github.com/adafruit/Adafruit_MQTT_Library).
+It's really easy to use, but Home Assistant autodiscovery needs retained messages,
+which the Adafruit library does not support.
+I switched to this MQTT library instead: https://github.com/plapointe6/EspMQTTClient
+For some reason, it takes a lot longer to connect to WiFi and MQTT than other libraries.
+I didn't figure out why, but it doesn't matter for this always-on code.
 
 In the MQTT version, 
 I simplified the calculations done locally to just report the measured RMS voltage.
