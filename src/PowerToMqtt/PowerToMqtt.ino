@@ -19,7 +19,6 @@
 
 // WiFi and MQTT network info.
 #if 0
-
 #else
 #define WIFI_SSID "WIFI_SSID"
 #define WIFI_PASSWORD "wifi password"
@@ -71,16 +70,7 @@ const int DURATION_OF_MEASUREMENT = 21000; // microseconds
 
 const int READS_PER_MEASUREMENT = DURATION_OF_MEASUREMENT / INTRA_MEASUREMENT_DELAY;
 
-//EspMQTTClient mqtt(WIFI_SSID, WIFI_PASSWORD, MQTT_SERVER, MQTT_USER, MQTT_PASSWORD, MQTT_USER, MQTT_PORT);
-EspMQTTClient mqtt(
-  "Bothless",
-  "98011=98011",
-  "mqtt.carpenter.org",  // MQTT Broker server ip
-  "powerwatcher",   // Can be omitted if not needed
-  "hunter2hunter3",   // Can be omitted if not needed
-  "TestClient",     // Client name that uniquely identify your device
-  1883              // The MQTT port, default to 1883. this line can be omitted
-);
+EspMQTTClient mqtt(WIFI_SSID, WIFI_PASSWORD, MQTT_SERVER, MQTT_USER, MQTT_PASSWORD, MQTT_USER, MQTT_PORT);
 
 typedef struct 
 {
@@ -142,7 +132,7 @@ static CHANNEL c0  = {
 		      ac_input_4, ac_mux_pin_0,  dc_mux_pin_0, 409,
 		      0,0,0,
 		      MIDDLE,0,
-		      1.0,4.0,360,60
+		      1.0,4.0,600,60
 };
 static CHANNEL c4  = {
 		      4, "channel 4",
@@ -156,7 +146,7 @@ static CHANNEL c8  = {
 		      ac_input_5, ac_mux_pin_8,  dc_mux_pin_8, 409,
 		      0,0,0,
 		      MIDDLE,0,
-		      1.0,4.0,60,60
+		      1.0,4.0,120,60
 };
 static CHANNEL c12 = {
 		      12, "channel 12",
