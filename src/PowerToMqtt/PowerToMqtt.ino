@@ -18,7 +18,8 @@
 // config start -------------------------------------
 
 // WiFi and MQTT network info.
-#if 0
+#if 1
+
 #else
 #define WIFI_SSID "WIFI_SSID"
 #define WIFI_PASSWORD "wifi password"
@@ -229,7 +230,12 @@ loop()
     process_channel_results(&thisChannel);
   }
   digitalWrite(ledPin, LED_OFF);
-  delay(ITERATION_DELAY);
+  int delay_slice = (ITERATION_DELAY + 5) / 10;
+  for (int ii=0; ii<10; ++ii)
+  {
+    delay(delay_slice);
+    mqtt.loop();
+  }
 }
 
 void
