@@ -329,8 +329,8 @@ process_channel_results(CHANNEL *thisChannel)
   char payload[100];
 
   snprintf(topic, sizeof(topic), stateTopicFormat, thisChannel->mux_pin);
-  snprintf(payload, sizeof(payload), "{\"mvrms\":\"%.2f\", \"amps\":\"%.2f\", \"onoff\":\"%s\"}",
-	   acVoltage, acCurrent, new_state == ON ? "on" : "off");
+  snprintf(payload, sizeof(payload), "{\"mvrms\":\"%.2f\", \"amps\":\"%.2f\", \"onoff\":\"%s\", \"deltaadc\":\"%d\"}",
+	   acVoltage, acCurrent, new_state == ON ? "on" : "off", (thisChannel->ticks_maximum - thisChannel->ticks_minimum));
   mqtt.publish(topic, payload);
 
 #if PRINT_MEASUREMENT_SUMMARY
@@ -467,6 +467,16 @@ ha_sensor_config_one_channel(CHANNEL *thisChannel)
   char payload[500];
   snprintf(state_topic, sizeof(state_topic), stateTopicFormat, thisChannel->mux_pin);
   
+  snprintf(ha_topic, sizeof(ha_topic), "homeassistant/sensor/" DEVICE_ID "/ch%d_Delta_ADC/config", chnum);
+  snprintf(payload, sizeof(payload), sensorPayloadFormat,
+	   "ticks", /* UoM */
+	   chnum, "Delta ADC", /* name */
+	   state_topic,
+	   chnum, "deltaadc", /* uniqueId */
+	   "deltaadc"); /* value template */
+  Serial.println(payload);
+  mqtt.publish(ha_topic, payload, true);
+
   snprintf(ha_topic, sizeof(ha_topic), "homeassistant/sensor/" DEVICE_ID "/ch%d_ac_mV_rms/config", chnum);
   snprintf(payload, sizeof(payload), sensorPayloadFormat,
 	   "mVrms", /* UoM */
